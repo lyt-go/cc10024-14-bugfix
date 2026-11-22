@@ -39,6 +39,22 @@ def _record_recovery_to_history(entry: dict[str, Any]) -> None:
 register_hook("error_recover", "确认恢复", _record_recovery_to_history)
 
 
+def _trigger_recrawl_on_retry(entry: dict[str, Any]) -> None:
+    """发起重试时，按页面重复组逐组触发复采（复采定位取各组代表页）。"""
+    from app.services.page_dedup import PageDedupService
+    dedup_svc = PageDedupService()
+    tasks = dedup_svc.trigger_recrawl(
+        trigger="error_recover:发起重试",
+        recovery_task=entry.get("任务编号", ""),
+    )
+    # 累计重试次数并记录本次触发的复采任务数
+    raw = str(entry.get("已重试次数") or "")
+    entry["已重试次数"] = str(int(raw) + 1) if raw.isdigit() else "1"
+    entry["复采任务数"] = str(len(tasks))
+
+register_hook("error_recover", "发起重试", _trigger_recrawl_on_retry)
+
+
 class ErrorRecoverService(BaseModuleService):
     MODULE = "error_recover"
     ENTITY = "恢复任务"
@@ -62,4 +78,6 @@ class ErrorRecoverService(BaseModuleService):
         base["recovery_runs"] = len(recovery_runs)
         base["retry_total"] = sum(
             int(str(r.get("已重试次数") or "0")) for r in tasks if str(r.get("已重试次数") or "").isdigit())
+        # 发起重试触发的逐组复采任务
+        base["recrawl_tasks"] = len(persist.read_jsonl("runs", "recrawl_tasks.jsonl"))
         return base

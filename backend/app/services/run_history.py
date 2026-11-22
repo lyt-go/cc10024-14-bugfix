@@ -11,27 +11,25 @@ from app import persistence as persist
 
 def _auto_dedup_and_check_on_confirm(entry: dict[str, Any]) -> None:
     """运行历史确认完成时触发自动去重和Schema校验。"""
-    # 触发page_dedup去重
+    # 触发page_dedup去重：按页面重复组出实际去重计数，出具运行回执，
+    # 并把各组代表页的采集定位同步到后续复采计划。
     dedup_rows = store.rows("page_dedup")
     active_dedup = [d for d in dedup_rows if d.get("status") == "已生效"]
     if active_dedup:
-        # 读取page_snapshot快照文件进行去重
-        snap_files = [f for f in persist.list_files("snapshots", ".json") if f.startswith("page_")]
-        if snap_files:
-            pages_data = []
-            for sf in snap_files[:5]:  # 采样前5份快照
-                snap = persist.read_json("snapshots", sf)
-                if snap:
-                    pages_data.append(snap)
-            if pages_data and active_dedup:
-                fp = hashlib.md5(str(pages_data).encode()).hexdigest()[:16]
-                persist.append_jsonl("reports", "dedup_report.jsonl", {
-                    "trigger": "run_history_confirm",
-                    "run_id": entry.get("id"),
-                    "timestamp": persist.now_iso(),
-                    "snapshots_checked": len(pages_data),
-                    "fingerprint": fp,
-                })
+        from app.services.page_dedup import PageDedupService
+        dedup_svc = PageDedupService()
+        dedup_svc.sync_recrawl_plans()
+        counts = dedup_svc.dedup_counts()
+        receipt = dedup_svc.issue_receipt(run_id=entry.get("id"), run_code=entry.get("记录编号", ""))
+        persist.append_jsonl("reports", "dedup_report.jsonl", {
+            "trigger": "run_history_confirm",
+            "run_id": entry.get("id"),
+            "timestamp": persist.now_iso(),
+            "total_captures": counts["total_captures"],
+            "unique_groups": counts["unique_groups"],
+            "duplicates": counts["duplicates"],
+            "receipt_id": receipt.get("receipt_id"),
+        })
 
     # 触发schema_check校验
     schema_rows = store.rows("schema_check")
@@ -45,7 +43,6 @@ def _auto_dedup_and_check_on_confirm(entry: dict[str, Any]) -> None:
             "result": "pass",
         })
 
-import hashlib
 register_hook("run_history", "确认完成", _auto_dedup_and_check_on_confirm)
 
 
@@ -87,6 +84,8 @@ class RunHistoryService(BaseModuleService):
         # 关联的去重报告
         dedup_reports = persist.read_jsonl("reports", "dedup_report.jsonl")
         base["triggered_dedup"] = len([r for r in dedup_reports if r.get("trigger") == "run_history_confirm"])
+        # 已出具的运行回执
+        base["run_receipts"] = len(persist.read_jsonl("reports", "run_receipts.jsonl"))
         # 关联的schema校验报告
         schema_reports = persist.read_jsonl("reports", "schema_check_report.jsonl")
         base["triggered_schema"] = len([r for r in schema_reports if r.get("trigger") == "run_history_confirm"])
